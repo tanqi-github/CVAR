@@ -1,2 +1,8 @@
 *__pycache__/
 chkpt/
+*.csv
+*.gz
+*.pkl
+*.iml
+*.xml
+MovieLen_Model.deepfm

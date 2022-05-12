@@ -9,13 +9,14 @@ from data import MovieLens1MColdStartDataLoader, TaobaoADColdStartDataLoader
 from model import FactorizationMachineModel, WideAndDeep, DeepFactorizationMachineModel, AdaptiveFactorizationNetwork, ProductNeuralNetworkModel
 from model import AttentionalFactorizationMachineModel, DeepCrossNetworkModel, MWUF, MetaE, CVAR
 from model.wd import WideAndDeep
+from model.cvaegan import CVAEGAN
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pretrain_model', default='')
     parser.add_argument('--dataset_name', default='movielens1M', help='required to be one of [movielens1M, taobaoAd]')
-    parser.add_argument('--dataset_path', default='./datahub/movielens1M/ml-1M.pkl')
-    parser.add_argument('--warmup_model', default='cvar', help="required to be one of [base, mwuf, metaE, cvar]")
+    parser.add_argument('--dataset_path', default='./datahub/movielens1M/emb_warm_split_preprocess_ml-1M.pkl')
+    parser.add_argument('--warmup_model', default='cvaegan', help="required to be one of [base, mwuf, metaE, cvar, cvaegan]")
     parser.add_argument('--is_dropoutnet', type=bool, default=False, help="whether to use dropout net for pretrain")
     parser.add_argument('--bsz', type=int, default=2048)
     parser.add_argument('--shuffle', type=int, default=1)
@@ -23,7 +24,7 @@ def get_args():
     parser.add_argument('--epoch', type=int, default=1)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=1e-6)
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='cpu')
     parser.add_argument('--save_dir', default='chkpt')
     parser.add_argument('--seed', type=int, default=-1)
 
@@ -379,7 +380,8 @@ def cvar(model,
         train_a = dataloaders['train_warm_a']
         for (features, label) in train_a:
             origin_item_id_emb = warm_model.model.emb_layer[warm_model.item_id_name].weight.data
-            warm_item_id_emb = warm_model.warm_item_id_p(features, is_cold)
+            # warm_item_id_emb = warm_model.warm_item_id_p(features, is_cold)
+            warm_item_id_emb = warm_model.warm_item_id_p(features)
             indexes = features[warm_model.item_id_name].squeeze()
             # origin_item_id_emb[indexes, ] = 0.5 * warm_item_id_emb + 0.5 * origin_item_id_emb[indexes, ]
             origin_item_id_emb[indexes, ] = warm_item_id_emb
@@ -402,6 +404,111 @@ def cvar(model,
     print("*"*20, "cvar", "*"*20)
     return auc_list
 
+def cvaegan(model,
+       dataloaders,
+       model_name,
+       epoch,
+       lr,
+       weight_decay,
+       device,
+       save_dir):
+    print("*"*20, "cvaegan", "*"*20)
+    device = torch.device(device)
+    save_dir = os.path.join(save_dir, model_name)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, 'model.pth')
+    train_base = dataloaders['train_base']
+    # train cvar
+    warm_model = CVAEGAN(model,
+                    warm_features=dataloaders.item_features,
+                    train_loader=train_base,
+                    device=device).to(device)
+    warm_model.init_cvaegan()
+    def train_cvaegan(dataloader, epoch=2, logger=False):
+        warm_model.train()
+        criterion = torch.nn.BCELoss()
+        warm_model.optimizer_cvaegan()
+
+        optimizer_main = torch.optim.Adam(params=[kv[1] for kv in warm_model.named_parameters() if
+                                                  kv[1].requires_grad and 'discriminator' not in kv[0]], \
+                                          lr=lr, weight_decay=weight_decay)  # except D
+
+        optimizer_d = torch.optim.Adam(params=warm_model.discriminator.parameters(), \
+                                       lr=lr, weight_decay=weight_decay)
+        total_iters = len(dataloader)
+        for e in range(epoch):
+            for i, (features, label) in enumerate(dataloader):
+                bsz = label.shape[0]
+                adv_criterion = torch.nn.BCELoss().to(device)
+                real_label = torch.ones((bsz, 1)).to(device)
+                fake_label = torch.zeros((bsz, 1)).to(device)
+
+                ## train ae and model
+                recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
+                pred_adv = warm_model.discriminator(warm_id_emb)
+                adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
+                main_loss = criterion(target, label.float())
+                loss = main_loss + reg_loss + adv_loss_G + recon_loss
+                warm_model.zero_grad()
+                loss.backward(retain_graph=True)
+                optimizer_main.step()
+
+                ## train discriminator
+                for inner_iter in range(3):
+                    recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
+
+                    item_ids = features[warm_model.item_id_name]
+                    item_id_emb = warm_model.origin_item_emb(item_ids).squeeze()
+                    real_item_emb = item_id_emb
+
+                    real_pred = warm_model.discriminator(real_item_emb)
+                    fake_pred = warm_model.discriminator(warm_id_emb)  # geneated is fake
+
+                    # print(real_pred.requires_grad)
+                    adv_loss = (adv_criterion(fake_pred, fake_label) + adv_criterion(real_pred, real_label)) / 2
+
+                    optimizer_d.zero_grad()
+                    adv_loss.backward(retain_graph=True)
+                    optimizer_d.step()
+
+                if (i + 1) % 10 == 0:
+                    print(
+                        "    iters {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss: {:.4f}, adv_loss_G: {:.4f}" \
+                        .format(i + 1, int(total_iters), \
+                                loss.item(), main_loss, recon_loss, reg_loss, adv_loss, adv_loss_G), end='\r')
+            print("{}/{}".format(e, epoch))
+
+    # replace item id embedding with warmed
+    def warm(is_cold=False):
+        train_a = dataloaders['train_warm_a']
+        for (features, label) in train_a:
+            origin_item_id_emb = warm_model.model.emb_layer[warm_model.item_id_name].weight.data
+            # warm_item_id_emb = warm_model.warm_item_id_p(features, is_cold)
+            warm_item_id_emb = warm_model.warm_item_id_p(features)
+            indexes = features[warm_model.item_id_name].squeeze()
+            # origin_item_id_emb[indexes, ] = 0.5 * warm_item_id_emb + 0.5 * origin_item_id_emb[indexes, ]
+            origin_item_id_emb[indexes, ] = warm_item_id_emb
+    train_cvaegan(train_base, epoch=1, logger=True)
+    warm(is_cold=True)
+    # test by steps
+    dataset_list = ['train_warm_a', 'train_warm_b', 'train_warm_c', 'test']
+    auc_list = []
+    for i, train_s in enumerate(dataset_list):
+        print("#"*10, dataset_list[i],'#'*10)
+        train_s = dataset_list[i]
+        auc, f1 = test(warm_model.model, dataloaders['test'], device)
+        auc_list.append(auc.item())
+        print("[cvar]] evaluate on [test dataset] auc: {:.4f}, F1 score: {:.4f}".format(auc, f1))
+        if i < len(dataset_list) - 1:
+            warm_model.model.only_optimize_itemid()
+            train(warm_model.model, dataloaders[train_s], device, epoch, lr, weight_decay, save_path)
+            train_cvaegan(dataloaders[train_s], epoch=2, logger=False)
+            warm()
+    print("*"*20, "cvaegan", "*"*20)
+    return auc_list
+
+
 def run(model, dataloaders, args, model_name, warm):
     if warm == 'base':
         auc_list = base(model, dataloaders, model_name, args.epoch, args.lr, args.weight_decay, args.device, args.save_dir)
@@ -411,6 +518,9 @@ def run(model, dataloaders, args, model_name, warm):
         auc_list = metaE(model, dataloaders, model_name, args.epoch, args.lr, args.weight_decay, args.device, args.save_dir)
     elif warm == 'cvar': 
         auc_list = cvar(model, dataloaders, model_name, args.epoch, args.lr, args.weight_decay, args.device, args.save_dir)
+    elif warm == 'cvaegan':
+        auc_list = cvaegan(model, dataloaders, model_name, args.epoch, args.lr, args.weight_decay, args.device,
+                         args.save_dir)
     return auc_list
 
 if __name__ == '__main__':
