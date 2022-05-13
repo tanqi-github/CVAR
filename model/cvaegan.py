@@ -79,6 +79,13 @@ class CVAEGAN(nn.Module):
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
+
+        self.condition_discriminator = nn.Sequential(
+            nn.Linear(16, 32),
+            nn.ReLU(),
+            nn.Linear(32, 5),
+            # nn.Sigmoid()
+        )
         return
 
     def wasserstein(self, mean1, log_v1, mean2, log_v2):
