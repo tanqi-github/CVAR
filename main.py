@@ -16,9 +16,12 @@ import pdb
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pretrain_model', default='')
-    parser.add_argument('--dataset_name', default='movielens1M', help='required to be one of [movielens1M, taobaoAd]')
-    parser.add_argument('--dataset_path', default='./datahub/movielens1M/emb_warm_split_preprocess_ml-1M.pkl')
-    parser.add_argument('--warmup_model', default='cvaegan_c', help="required to be one of [base, mwuf, metaE, cvar, cvaegan]")
+    # parser.add_argument('--dataset_name', default='movielens1M', help='required to be one of [movielens1M, taobaoAd]')
+    # parser.add_argument('--dataset_path', default='./datahub/movielens1M/emb_warm_split_preprocess_ml-1M.pkl')
+    parser.add_argument('--dataset_name', default='taobaoAd')
+    parser.add_argument('--dataset_path',
+                        default='./datahub/taobaoAd/cold_start/emb_warm_split_preprocess_taobao-ad.pkl')
+    parser.add_argument('--warmup_model', default='cvaegan', help="required to be one of [base, mwuf, metaE, cvar, cvaegan]")
     parser.add_argument('--is_dropoutnet', type=bool, default=False, help="whether to use dropout net for pretrain")
     parser.add_argument('--bsz', type=int, default=2048)
     parser.add_argument('--shuffle', type=int, default=1)
@@ -28,7 +31,7 @@ def get_args():
     parser.add_argument('--weight_decay', type=float, default=1e-6)
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--save_dir', default='chkpt')
-    parser.add_argument('--seed', type=int, default=-1)
+    parser.add_argument('--seed', type=int, default=666)
 
     args = parser.parse_args()
     return args
