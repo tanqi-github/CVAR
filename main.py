@@ -449,7 +449,7 @@ def cvaegan(model,
         # train warm-up model
         for e in range(epochs):
             for i, (features, label) in enumerate(dataloader):
-                a, b, c, d = 0.0, 0.0, 0.0, 0.0
+                a, b, c, d, e = 0.0, 0.0, 0.0, 0.0, 0.0
                 for _ in range(iters):
                     bsz = label.shape[0]
                     adv_criterion = torch.nn.BCELoss().to(device)
@@ -458,22 +458,22 @@ def cvaegan(model,
 
                     ## train ae and model
 
-                    target, recon_term, reg_term = warm_model(features)
+                    target, recon_term, reg_term, warm_id_emb = warm_model(features)
                     main_loss = criterion(target, label.float())
-                    loss = main_loss + recon_term + 1e-4 * reg_term
+                    # loss = main_loss + recon_term + 1e-4 * reg_term
 
                     # recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
                     pred_adv = warm_model.discriminator(warm_id_emb)
                     adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
                     main_loss = criterion(target, label.float())
-                    loss = main_loss + recon_term + 1e-4 * reg_term + adv_loss_G
+                    loss = main_loss + recon_term + 1e-4 * reg_term + 0.1 * adv_loss_G
                     warm_model.zero_grad()
                     loss.backward(retain_graph=True)
                     optimizer_main.step()
 
                     ## train discriminator
                     for inner_iter in range(3):
-                        recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
+                        _, _, _, warm_id_emb = warm_model(features)
 
                         item_ids = features[warm_model.item_id_name]
                         item_id_emb = warm_model.origin_item_emb(item_ids).squeeze()
@@ -489,11 +489,11 @@ def cvaegan(model,
                         adv_loss.backward(retain_graph=True)
                         optimizer_d.step()
 
-                    a, b, c, d = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item()
-                a, b, c, d = a/iters, b/iters, c/iters, d/iters
+                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + adv_loss_G
+                a, b, c, d, e = a/iters, b/iters, c/iters, d/iters, e/iters
                 if logger and (i + 1) % 10 == 0:
-                    print("    Iter {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}" \
-                            .format(i + 1, batch_num, a, b, c, d), end='\r')
+                    print("    Iter {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss_G: {:.4f}" \
+                            .format(i + 1, batch_num, a, b, c, d, e), end='\r')
         # warm-up item id embedding
         train_a = dataloaders['train_warm_a']
         for (features, label) in train_a:
@@ -503,10 +503,12 @@ def cvaegan(model,
             indexes = features[warm_model.item_id_name].squeeze()
             origin_item_id_emb[indexes, ] = warm_item_id_emb
 
+
     warm_up(train_base, epochs=1, iters=cvar_iters, logger=True)
     # test by steps
     dataset_list = ['train_warm_a', 'train_warm_b', 'train_warm_c', 'test']
     auc_list = []
+
     for i, train_s in enumerate(dataset_list):
         print("#"*10, dataset_list[i],'#'*10)
         train_s = dataset_list[i]

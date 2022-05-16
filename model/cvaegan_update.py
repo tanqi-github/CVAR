@@ -58,9 +58,9 @@ class CVAEGAN(nn.Module):
         )
 
         self.condition_discriminator = nn.Sequential(
-            nn.Linear(16, 32),
-            nn.ReLU(),
-            nn.Linear(32, 5),
+            nn.Linear(16, 5),
+            # nn.ReLU(),
+            # nn.Linear(32, 5),
             # nn.Sigmoid()
         )
 
@@ -122,6 +122,7 @@ class CVAEGAN(nn.Module):
         z = mean + 1e-4 * torch.exp(log_v * 0.5) * torch.randn(mean.size()).to(self.device)
         z_p = mean_p + 1e-4 * torch.exp(log_v_p * 0.5) * torch.randn(mean_p.size()).to(self.device)
         freq = x_dict['count']
+        # freq = x_dict['genres'][:,[1]]
         pred = self.decoder(torch.concat([z, freq], 1))
         pred_p = self.decoder(torch.concat([z_p, freq], 1))
         recon_term = torch.square(pred - item_id_emb).sum(-1).mean()
@@ -130,5 +131,5 @@ class CVAEGAN(nn.Module):
     def forward(self, x_dict):
         warm_id_emb, reg_term, recon_term = self.warm_item_id(x_dict)
         target = self.model.forward_with_item_id_emb(warm_id_emb, x_dict)
-        return target, recon_term, reg_term
+        return target, recon_term, reg_term, warm_id_emb
 
