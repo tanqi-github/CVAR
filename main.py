@@ -527,11 +527,13 @@ def cvaegan_c(model,
        dataloaders,
        model_name,
        epoch,
+       cvar_epochs,
+       cvar_iters,
        lr,
        weight_decay,
        device,
        save_dir):
-    print("*"*20, "cvaegan_c", "*"*20)
+    print("*"*20, "cvaegan", "*"*20)
     device = torch.device(device)
     save_dir = os.path.join(save_dir, model_name)
     if not os.path.exists(save_dir):
@@ -542,13 +544,12 @@ def cvaegan_c(model,
     warm_model = CVAEGAN(model,
                     warm_features=dataloaders.item_features,
                     train_loader=train_base,
-                    device=device).to(device)
+                    device=device, c_feature='cat').to(device)
     warm_model.init_cvaegan()
-    def train_cvaegan(dataloader, epoch=2, logger=False):
+    def warm_up(dataloader, epochs, iters, logger=False):
         warm_model.train()
         criterion = torch.nn.BCELoss()
         CE_loss = torch.nn.CrossEntropyLoss()
-        MSE_loss = torch.nn.MSELoss()
         warm_model.optimizer_cvaegan()
 
         optimizer_main = torch.optim.Adam(params=[kv[1] for kv in warm_model.named_parameters() if
@@ -557,96 +558,100 @@ def cvaegan_c(model,
 
         optimizer_d = torch.optim.Adam(params=[p for p in warm_model.discriminator.parameters()] + [p for p in warm_model.condition_discriminator.parameters()], \
                                        lr=lr, weight_decay=weight_decay)
-        total_iters = len(dataloader)
-        for e in range(epoch):
+
+        batch_num = len(dataloader)
+        # train warm-up model
+        for e in range(epochs):
             for i, (features, label) in enumerate(dataloader):
-                bsz = label.shape[0]
-                adv_criterion = torch.nn.BCELoss().to(device)
-                real_label = torch.ones((bsz, 1)).to(device)
-                fake_label = torch.zeros((bsz, 1)).to(device)
+                a, b, c, d, e = 0.0, 0.0, 0.0, 0.0, 0.0
+                for _ in range(iters):
+                    bsz = label.shape[0]
+                    adv_criterion = torch.nn.BCELoss().to(device)
+                    real_label = torch.ones((bsz, 1)).to(device)
+                    fake_label = torch.zeros((bsz, 1)).to(device)
 
-                ## train ae and model
-                recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
-                pred_adv = warm_model.discriminator(warm_id_emb)
-                adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
-                main_loss = criterion(target, label.float())
+                    ## train ae and model
 
-                # get matching loss
-                real_input = warm_model.origin_item_emb(features[warm_model.item_id_name]).squeeze()
-
-                for j in range(len(warm_model.condition_discriminator)-1):
-                    real_input = warm_model.condition_discriminator[j](real_input)
-
-                warm_id_emb_input = warm_id_emb
-                for j in range(len(warm_model.condition_discriminator)-1):
-                    warm_id_emb_input = warm_model.condition_discriminator[j](warm_id_emb_input)
+                    target, recon_term, reg_term, warm_id_emb = warm_model(features)
 
 
-                loss_matching = torch.mean(torch.square(warm_id_emb_input -  real_input))
-                loss = main_loss + reg_loss + adv_loss_G + recon_loss + loss_matching
-                warm_model.zero_grad()
-                loss.backward(retain_graph=True)
-                optimizer_main.step()
+                    pred_adv = warm_model.discriminator(warm_id_emb)
+                    adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
+                    main_loss = criterion(target, label.float())
 
-                ## train discriminator
-                for inner_iter in range(3):
-                    recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
+                    # get matching loss
+                    real_input = warm_model.origin_item_emb(features[warm_model.item_id_name]).squeeze()
 
-                    item_ids = features[warm_model.item_id_name]
-                    item_id_emb = warm_model.origin_item_emb(item_ids).squeeze()
-                    real_item_emb = item_id_emb
+                    for j in range(len(warm_model.condition_discriminator) - 1):
+                        real_input = warm_model.condition_discriminator[j](real_input)
 
-                    real_pred = warm_model.discriminator(real_item_emb)
-                    fake_pred = warm_model.discriminator(warm_id_emb)  # geneated is fake
+                    warm_id_emb_input = warm_id_emb
+                    for j in range(len(warm_model.condition_discriminator) - 1):
+                        warm_id_emb_input = warm_model.condition_discriminator[j](warm_id_emb_input)
 
-                    class_label = np.digitize(features['count'], [0, 0.2, 0.4, 0.6, 0.8, ]) - 1
-                    pred_class = warm_model.condition_discriminator(warm_id_emb)
-                    condition_loss = CE_loss(pred_class, torch.from_numpy(class_label).squeeze())
+                    loss_matching = torch.mean(torch.square(warm_id_emb_input - real_input))
 
-                    # print(real_pred.requires_grad)
-                    adv_loss = (adv_criterion(fake_pred, fake_label) + adv_criterion(real_pred, real_label)) / 2
+                    loss = main_loss + recon_term + 1e-4 * reg_term + 0.1 * adv_loss_G + 0.1 * loss_matching
+                    warm_model.zero_grad()
+                    loss.backward(retain_graph=True)
+                    optimizer_main.step()
 
-                    adv_loss += condition_loss
+                    ## train discriminator
+                    for inner_iter in range(3):
+                        _, _, _, warm_id_emb = warm_model(features)
 
-                    optimizer_d.zero_grad()
-                    adv_loss.backward(retain_graph=True)
-                    optimizer_d.step()
+                        item_ids = features[warm_model.item_id_name]
+                        item_id_emb = warm_model.origin_item_emb(item_ids).squeeze()
+                        real_item_emb = item_id_emb
 
-                if (i + 1) % 10 == 0:
-                    print(
-                        "    iters {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss: {:.4f}, adv_loss_G: {:.4f}" \
-                        .format(i + 1, int(total_iters), \
-                                loss.item(), main_loss, recon_loss, reg_loss, adv_loss, adv_loss_G), end='\r')
-            print("{}/{}".format(e, epoch))
+                        real_pred = warm_model.discriminator(real_item_emb)
+                        fake_pred = warm_model.discriminator(warm_id_emb)  # geneated is fake
 
-    # replace item id embedding with warmed
-    def warm(is_cold=False):
+                        class_label = features['genres'][:,[1]]
+                        pred_class = warm_model.condition_discriminator(warm_id_emb)
+                        condition_loss = CE_loss(pred_class, class_label.squeeze())
+
+                        # print(real_pred.requires_grad)
+                        adv_loss = (adv_criterion(fake_pred, fake_label) + adv_criterion(real_pred, real_label)) / 2
+                        adv_loss += condition_loss
+
+                        optimizer_d.zero_grad()
+                        adv_loss.backward(retain_graph=True)
+                        optimizer_d.step()
+
+                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + adv_loss_G
+                a, b, c, d, e = a/iters, b/iters, c/iters, d/iters, e/iters
+                if logger and (i + 1) % 10 == 0:
+                    print("    Iter {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss_G: {:.4f}" \
+                            .format(i + 1, batch_num, a, b, c, d, e), end='\r')
+        # warm-up item id embedding
         train_a = dataloaders['train_warm_a']
         for (features, label) in train_a:
             origin_item_id_emb = warm_model.model.emb_layer[warm_model.item_id_name].weight.data
-            # warm_item_id_emb = warm_model.warm_item_id_p(features, is_cold)
-            warm_item_id_emb = warm_model.warm_item_id_p(features)
+
+            warm_item_id_emb, _, _ = warm_model.warm_item_id(features)
             indexes = features[warm_model.item_id_name].squeeze()
-            # origin_item_id_emb[indexes, ] = 0.5 * warm_item_id_emb + 0.5 * origin_item_id_emb[indexes, ]
             origin_item_id_emb[indexes, ] = warm_item_id_emb
-    train_cvaegan(train_base, epoch=1, logger=True)
-    warm(is_cold=True)
+
+
+    warm_up(train_base, epochs=1, iters=cvar_iters, logger=True)
     # test by steps
     dataset_list = ['train_warm_a', 'train_warm_b', 'train_warm_c', 'test']
     auc_list = []
+
     for i, train_s in enumerate(dataset_list):
         print("#"*10, dataset_list[i],'#'*10)
         train_s = dataset_list[i]
         auc, f1 = test(warm_model.model, dataloaders['test'], device)
         auc_list.append(auc.item())
-        print("[cvar]] evaluate on [test dataset] auc: {:.4f}, F1 score: {:.4f}".format(auc, f1))
+        print("[cvaegan] evaluate on [test dataset] auc: {:.4f}, F1 score: {:.4f}".format(auc, f1))
         if i < len(dataset_list) - 1:
             warm_model.model.only_optimize_itemid()
             train(warm_model.model, dataloaders[train_s], device, epoch, lr, weight_decay, save_path)
-            train_cvaegan(dataloaders[train_s], epoch=2, logger=False)
-            warm()
+            warm_up(dataloaders[train_s], epochs=cvar_epochs, iters=cvar_iters, logger=False)
     print("*"*20, "cvaegan", "*"*20)
     return auc_list
+
 
 
 def run(model, dataloaders, args, model_name, warm):
@@ -661,8 +666,7 @@ def run(model, dataloaders, args, model_name, warm):
     elif warm == 'cvaegan':
         auc_list = cvaegan(model, dataloaders, model_name, args.epoch, args.cvar_epochs, args.cvar_iters, args.lr, args.weight_decay, args.device, args.save_dir)
     elif warm == 'cvaegan_c':
-        auc_list = cvaegan_c(model, dataloaders, model_name, args.epoch, args.lr, args.weight_decay, args.device,
-                         args.save_dir)
+        auc_list = cvaegan_c(model, dataloaders, model_name, args.epoch, args.cvar_epochs, args.cvar_iters, args.lr, args.weight_decay, args.device, args.save_dir)
 
     return auc_list
 
