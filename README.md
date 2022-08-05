@@ -44,7 +44,7 @@ You can conduct experiments as following command:
 `python main.py --dataset_name movielens1M  --model_name deepfm --warmup_model cvar --cvar_epochs 2  --cvar_iters 10`
 <br>
 <br>
-`python main.py --dataset_name taobaoAD  --model_name deepfm  --warmup_model cvar --cvar_epochs 2 --cvar_iters 1`
+`python main.py --dataset_name taobaoAD  --model_name deepfm  --warmup_model cvaegan --cvar_epochs 2 --cvar_iters 1`
 <br>
 <br>
 The program will print the AUC, F1 in cold-start stage and three warm-up stages. Part of settable parameters are listed as follows:

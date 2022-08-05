@@ -465,8 +465,24 @@ def cvaegan(model,
                     # recon_loss, reg_loss, target, warm_id_emb = warm_model(features)
                     pred_adv = warm_model.discriminator(warm_id_emb)
                     adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
+
+                    # get matching loss
+                    real_input = warm_model.origin_item_emb(features[warm_model.item_id_name]).squeeze()
+
+                    for j in range(2): #len(warm_model.discriminator) - 1
+                        real_input = warm_model.discriminator[j](real_input)
+
+                    warm_id_emb_input = warm_id_emb
+                    for j in range(2):
+                        warm_id_emb_input = warm_model.discriminator[j](warm_id_emb_input)
+
+                    LG_2 = torch.mean(torch.square(warm_id_emb_input - real_input))
+                    LGD = torch.square(torch.mean(warm_id_emb_input) - torch.mean(real_input))
+
+
                     main_loss = criterion(target, label.float())
-                    loss = main_loss + recon_term + 1e-4 * reg_term + 0.1 * adv_loss_G
+                    loss = main_loss + recon_term + 1e-4 * reg_term + + 0.1 * LGD + 0.1 * LG_2 #+  0.1 * LGD + 0.1 * adv_loss_G
+
                     warm_model.zero_grad()
                     loss.backward(retain_graph=True)
                     optimizer_main.step()
@@ -489,7 +505,7 @@ def cvaegan(model,
                         adv_loss.backward(retain_graph=True)
                         optimizer_d.step()
 
-                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + adv_loss_G
+                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + 1
                 a, b, c, d, e = a/iters, b/iters, c/iters, d/iters, e/iters
                 if logger and (i + 1) % 10 == 0:
                     print("    Iter {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss_G: {:.4f}" \
@@ -571,27 +587,53 @@ def cvaegan_c(model,
                     fake_label = torch.zeros((bsz, 1)).to(device)
 
                     ## train ae and model
-
                     target, recon_term, reg_term, warm_id_emb = warm_model(features)
 
-
                     pred_adv = warm_model.discriminator(warm_id_emb)
-                    adv_loss_G = adv_criterion(pred_adv, real_label)  # make D think it is real
+                    loss_D = adv_criterion(pred_adv, real_label)  # make D think it is real
                     main_loss = criterion(target, label.float())
 
-                    # get matching loss
+                    # get Conditional loss LC
+                    class_label = features['genres'][:, [1]]
+                    pred_class = warm_model.condition_discriminator(warm_id_emb)
+                    loss_C = CE_loss(pred_class, class_label.squeeze())
+
+                    # get matching loss LGC
                     real_input = warm_model.origin_item_emb(features[warm_model.item_id_name]).squeeze()
 
-                    for j in range(len(warm_model.condition_discriminator) - 1):
+                    matching_layer = 2
+                    for j in range(matching_layer):
                         real_input = warm_model.condition_discriminator[j](real_input)
 
                     warm_id_emb_input = warm_id_emb
-                    for j in range(len(warm_model.condition_discriminator) - 1):
+                    for j in range(matching_layer):
                         warm_id_emb_input = warm_model.condition_discriminator[j](warm_id_emb_input)
 
-                    loss_matching = torch.mean(torch.square(warm_id_emb_input - real_input))
+                    # loss_matching_GC = 0.5 * torch.square(torch.mean(warm_id_emb_input) - torch.mean(real_input))
+                    loss_matching_GC = 0
+                    for j in range(18):
+                        iclass_idx = torch.equal(class_label, j*torch.ones_like(class_label))
+                        loss_matching_GC += torch.square(torch.mean(warm_id_emb_input[iclass_idx]) - torch.mean(real_input[iclass_idx]))
+                    loss_L2_C = 0.5 * torch.mean(torch.square(warm_id_emb_input - real_input))
 
-                    loss = main_loss + recon_term + 1e-4 * reg_term + 0.1 * adv_loss_G + 0.1 * loss_matching
+                    # get matching loss LGD
+                    real_input = warm_model.origin_item_emb(features[warm_model.item_id_name]).squeeze()
+                    for j in range(matching_layer):
+                        real_input = warm_model.discriminator[j](real_input)
+
+                    warm_id_emb_input = warm_id_emb
+                    for j in range(matching_layer):
+                        warm_id_emb_input = warm_model.discriminator[j](warm_id_emb_input)
+                    loss_matching_GD = 0.5 * torch.square(torch.mean(warm_id_emb_input) - torch.mean(real_input))
+
+                    loss_L2_D = 0.5 * torch.mean(torch.square(warm_id_emb_input - real_input))
+
+                    # get l2 reconstruction loss
+                    L2_loss = loss_L2_D + loss_L2_C # 0.5 * (torch.mean(torch.square(warm_id_emb - real_input)))  这个在recon_term中
+
+                    loss = main_loss + recon_term + 1e-4 * reg_term + 0.1 * L2_loss \
+                            + 0.1 * loss_matching_GC + 0.1 * loss_matching_GD
+
                     warm_model.zero_grad()
                     loss.backward(retain_graph=True)
                     optimizer_main.step()
@@ -619,7 +661,7 @@ def cvaegan_c(model,
                         adv_loss.backward(retain_graph=True)
                         optimizer_d.step()
 
-                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + adv_loss_G
+                    a, b, c, d, e = a + loss.item(), b + main_loss.item(), c + recon_term.item(), d + reg_term.item(), e + 1
                 a, b, c, d, e = a/iters, b/iters, c/iters, d/iters, e/iters
                 if logger and (i + 1) % 10 == 0:
                     print("    Iter {}/{}, loss: {:.4f}, main loss: {:.4f}, recon loss: {:.4f}, reg loss: {:.4f}, adv_loss_G: {:.4f}" \

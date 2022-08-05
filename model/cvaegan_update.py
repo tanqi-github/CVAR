@@ -123,10 +123,14 @@ class CVAEGAN(nn.Module):
         reg_term = self.wasserstein(mean, log_v, mean_p, log_v_p)
         z = mean + 1e-4 * torch.exp(log_v * 0.5) * torch.randn(mean.size()).to(self.device)
         z_p = mean_p + 1e-4 * torch.exp(log_v_p * 0.5) * torch.randn(mean_p.size()).to(self.device)
+
         if self.c_feature == 'x_fre':
             freq = x_dict['count']
-        else:
-            freq = x_dict['genres'][:,[1]]
+        elif self.c_feature == 'genres':
+            freq = x_dict['genres'][:, [0]]
+        elif self.c_feature == 'cate_id':
+            freq = x_dict['cate_id']
+
         pred = self.decoder(torch.concat([z, freq], 1))
         pred_p = self.decoder(torch.concat([z_p, freq], 1))
         recon_term = torch.square(pred - item_id_emb).sum(-1).mean()
